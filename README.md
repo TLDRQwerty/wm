@@ -1,5 +1,6 @@
 # A Simple Window Manager
 
+I have no idea what I am doing
 
 ## Development
 
