@@ -3,8 +3,8 @@ extern crate x11;
 
 use libc::{c_int, c_uint};
 use std::ffi::OsStr;
-use std::process::Command;
 use std::mem::zeroed;
+use std::process::Command;
 use x11::{keysym::*, xlib::*};
 
 fn max(a: c_int, b: c_int) -> c_uint {
@@ -18,6 +18,7 @@ fn max(a: c_int, b: c_int) -> c_uint {
 struct WindowManager {
     display: *mut Display,
     window: Window,
+    window_attributes: XWindowAttributes,
 }
 
 impl WindowManager {
@@ -28,7 +29,13 @@ impl WindowManager {
         }
 
         let window: Window = unsafe { XDefaultRootWindow(display) };
-        return Self { display, window };
+        let mut window_attributes: XWindowAttributes = unsafe { zeroed() };
+        unsafe { XGetWindowAttributes(display, window, &mut window_attributes) };
+        return Self {
+            display,
+            window,
+            window_attributes,
+        };
     }
 }
 
@@ -40,9 +47,8 @@ fn spawn_process(process: &OsStr) {
 }
 
 fn main() {
-    let mut arg0 = 0x0 as i8;
-    let mut attr: XWindowAttributes = unsafe { zeroed() };
     let mut start: XButtonEvent = unsafe { zeroed() };
+    let mut attr: XWindowAttributes = unsafe { zeroed() };
     let mut revert_to: i32 = 0;
     //let mut cursor: Cursor = unsafe { zeroed() };
 
@@ -91,59 +97,47 @@ fn main() {
     start.subwindow = 0;
     let mut event: XEvent = unsafe { zeroed() };
 
-    let mut window_attributes = unsafe { zeroed() };
-
-    unsafe {
-        XGetWindowAttributes(wm.display, wm.window, &mut window_attributes);
-    };
-
-    println!("{:?}", window_attributes);
-
     loop {
         unsafe {
             XNextEvent(wm.display, &mut event);
             XGetInputFocus(wm.display, &mut wm.window, &mut revert_to);
 
             match event.get_type() {
-                x11::xlib::KeyPress => {
-                    let xkey: XKeyEvent = From::from(event);
-                    println!("{:?}", xkey);
-                    if xkey.subwindow != 0 {
-                        XRaiseWindow(wm.display, xkey.subwindow);
+                KeyPress => {
+                    let ev: XKeyEvent = From::from(event);
 
-                        // Close window with mod+q
-                        if event.key.keycode
-                            == XKeysymToKeycode(wm.display, x11::keysym::XK_q.into()).into()
-                        {
+                    if ev.subwindow != 0 {
+                        XRaiseWindow(wm.display, ev.subwindow);
+                    }
+
+                    match XKeycodeToKeysym(
+                        wm.display,
+                        event.key.keycode.try_into().unwrap(),
+                        0 as c_int,
+                    ) as c_uint
+                    {
+                        XK_q => {
                             XDestroyWindow(wm.display, wm.window);
                         }
-                    }
-
-                    // Open a terminal with mod+enter
-                    if event.key.keycode == XKeysymToKeycode(wm.display, XK_Return.into()).into() {
-                        spawn_process(OsStr::new("kitty"));
-                    }
-
-                    // Open dmenu with mod+d
-                    if event.key.keycode == XKeysymToKeycode(wm.display, XK_d.into()).into() {
-                        spawn_process(OsStr::new("dmenu_run"));
-                    }
-
-                    // Open rofi with mod+space
-                    if event.key.keycode == XKeysymToKeycode(wm.display, XK_space.into()).into() {
-                        match Command::new("rofi").args(&["-show", "run"]).spawn() {
-                            Err(e) => eprintln!("couldn't spawn: {}", e.to_string()),
-                            _ => {}
-                        };
-                    }
-
-                    // Close r9wm with mod+backspace
-                    if event.key.keycode == XKeysymToKeycode(wm.display, XK_BackSpace.into()).into()
-                    {
-                        XCloseDisplay(wm.display);
+                        XK_Return => {
+                            spawn_process(OsStr::new("kitty"));
+                        }
+                        XK_d => {
+                            spawn_process(OsStr::new("dmenu_run"));
+                        }
+                        XK_space => {
+                            match Command::new("rofi").args(&["-show", "run"]).spawn() {
+                                Err(e) => eprintln!("couldn't spawn: {}", e.to_string()),
+                                _ => {}
+                            };
+                        }
+                        XK_BackSpace => {
+                            XCloseDisplay(wm.display);
+                        }
+                        _ => {}
                     }
                 }
-                x11::xlib::ButtonPress => {
+                ButtonPress => {
                     let xbutton: XButtonEvent = From::from(event);
                     if xbutton.subwindow != 0 {
                         XGetWindowAttributes(wm.display, xbutton.subwindow, &mut attr);
@@ -151,7 +145,8 @@ fn main() {
                         XRaiseWindow(wm.display, xbutton.subwindow);
                     }
                 }
-                x11::xlib::MotionNotify => {
+                MotionNotify => {
+                    let ev: XMotionEvent = From::from(event);
                     if start.subwindow != 0 {
                         //cursor = XCreateFontCursor(display, 58);
                         //XDefineCursor(display, start.subwindow, cursor);
@@ -168,10 +163,37 @@ fn main() {
                         );
                     }
                 }
-                x11::xlib::ButtonRelease => {
+                ButtonRelease => {
+                    let ev: XButtonReleasedEvent = From::from(event);
                     start.subwindow = 0;
                 }
-                _ => {}
+                MapRequest => {
+                    let ev: XMapRequestEvent = From::from(event);
+                    println!("map request -> {:?}", ev);
+                }
+                ConfigureRequest => {
+                    let ev: XConfigureRequestEvent = From::from(event);
+                    println!("configure request request -> {:?}", ev);
+                }
+                Expose => {
+                    let ev: XExposeEvent = From::from(event);
+                    println!("expose request -> {:?}", ev);
+                }
+                ClientMessage => {
+                    let ev: XExposeEvent = From::from(event);
+                    println!("client message -> {:?}", ev);
+                }
+                CreateNotify => {
+                    let ev: XExposeEvent = From::from(event);
+                    println!("create notify -> {:?}", ev);
+                }
+                PropertyNotify => {
+                    let ev: XPropertyEvent = From::from(event);
+                    println!("create notify -> {:?}", ev);
+                }
+                _ => {
+                    println!("Unhandled Event {:?} \n {:?} \n", event.get_type(), event);
+                }
             };
         }
     }
