@@ -1,200 +1,138 @@
-extern crate libc;
-extern crate x11;
-
-use libc::{c_int, c_uint};
-use std::ffi::OsStr;
-use std::mem::zeroed;
+use std::cmp::max;
 use std::process::Command;
-use x11::{keysym::*, xlib::*};
 
-fn max(a: c_int, b: c_int) -> c_uint {
-    if a > b {
-        a as c_uint
-    } else {
-        b as c_uint
-    }
-}
+use x11rb::connection::Connection;
+use x11rb::cookie::Cookie;
+use x11rb::errors::ReplyOrIdError;
+use x11rb::protocol::xproto::*;
+use x11rb::protocol::Event::{ButtonPress, ClientMessage, KeyPress, MotionNotify};
+use x11rb::rust_connection::{ConnectionError, DefaultStream, RustConnection};
+use x11rb::COPY_DEPTH_FROM_PARENT;
 
-struct WindowManager {
-    display: *mut Display,
-    window: Window,
-    window_attributes: XWindowAttributes,
-}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (conn, screen_num) = x11rb::connect(None).unwrap();
+    let root = conn.setup().roots[0].root;
+    let screen = &conn.setup().roots[screen_num];
 
-impl WindowManager {
-    fn new() -> Self {
-        let display = unsafe { XOpenDisplay(0x0 as *const i8) };
-        if display.is_null() {
-            panic!("Failed to find display");
-        }
+    let mode = GrabMode::ASYNC;
+    let mask = EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::BUTTON_MOTION;
+    let mask = u16::try_from(u32::from(mask)).unwrap();
 
-        let window: Window = unsafe { XDefaultRootWindow(display) };
-        let mut window_attributes: XWindowAttributes = unsafe { zeroed() };
-        unsafe { XGetWindowAttributes(display, window, &mut window_attributes) };
-        return Self {
-            display,
-            window,
-            window_attributes,
-        };
-    }
-}
+    conn.grab_button(
+        false,
+        root,
+        mask,
+        mode,
+        mode,
+        x11rb::NONE,
+        x11rb::NONE,
+        ButtonIndex::M1,
+        KeyButMask::MOD4,
+    )?;
 
-fn spawn_process(process: &OsStr) {
-    match Command::new(process).spawn() {
-        Err(e) => eprintln!("couldn't spawn: {}", e.to_string()),
-        _ => {}
-    };
-}
+    conn.grab_button(
+        false,
+        root,
+        mask,
+        mode,
+        mode,
+        x11rb::NONE,
+        x11rb::NONE,
+        ButtonIndex::M3,
+        KeyButMask::MOD4,
+    )?;
 
-fn main() {
-    let mut start: XButtonEvent = unsafe { zeroed() };
-    let mut attr: XWindowAttributes = unsafe { zeroed() };
-    let mut revert_to: i32 = 0;
-    //let mut cursor: Cursor = unsafe { zeroed() };
+    conn.grab_key(false, root, KeyButMask::MOD4, 36, mode, mode)?;
 
-    let mut wm = WindowManager::new();
+    conn.flush()?;
 
-    unsafe {
-        let shortcuts: Vec<c_uint> = vec![XK_d, XK_q, XK_Return, XK_space, XK_BackSpace];
-        for key in shortcuts {
-            XGrabKey(
-                wm.display,
-                XKeysymToKeycode(wm.display, key.into()) as c_int,
-                Mod4Mask,
-                wm.window,
-                true as c_int,
-                GrabModeAsync,
-                GrabModeAsync,
-            );
-        }
-
-        XGrabButton(
-            wm.display,
-            1 as c_uint,
-            Mod4Mask,
-            wm.window,
-            true as c_int,
-            (ButtonPressMask | ButtonReleaseMask | PointerMotionMask) as c_uint,
-            GrabModeAsync,
-            GrabModeAsync,
-            0,
-            0,
-        );
-        XGrabButton(
-            wm.display,
-            3 as c_uint,
-            Mod4Mask,
-            wm.window,
-            true as c_int,
-            (ButtonPressMask | ButtonReleaseMask | PointerMotionMask) as c_uint,
-            GrabModeAsync,
-            GrabModeAsync,
-            0,
-            0,
-        );
-    };
-
-    start.subwindow = 0;
-    let mut event: XEvent = unsafe { zeroed() };
+    let mut window_attributes: Option<ButtonPressEvent> = None;
+    let mut ge = None;
 
     loop {
-        unsafe {
-            XNextEvent(wm.display, &mut event);
-            XGetInputFocus(wm.display, &mut wm.window, &mut revert_to);
-
-            match event.get_type() {
-                KeyPress => {
-                    let ev: XKeyEvent = From::from(event);
-
-                    if ev.subwindow != 0 {
-                        XRaiseWindow(wm.display, ev.subwindow);
-                    }
-
-                    match XKeycodeToKeysym(
-                        wm.display,
-                        event.key.keycode.try_into().unwrap(),
-                        0 as c_int,
-                    ) as c_uint
-                    {
-                        XK_q => {
-                            XDestroyWindow(wm.display, wm.window);
-                        }
-                        XK_Return => {
-                            spawn_process(OsStr::new("kitty"));
-                        }
-                        XK_d => {
-                            spawn_process(OsStr::new("dmenu_run"));
-                        }
-                        XK_space => {
-                            match Command::new("rofi").args(&["-show", "run"]).spawn() {
-                                Err(e) => eprintln!("couldn't spawn: {}", e.to_string()),
-                                _ => {}
-                            };
-                        }
-                        XK_BackSpace => {
-                            XCloseDisplay(wm.display);
-                        }
+        let event = conn.wait_for_event()?;
+        match event {
+            KeyPress(event) => match event.detail {
+                36 => {
+                    match Command::new("kitty").spawn() {
+                        Err(e) => println!("An error occured {:?}", e.to_string()),
                         _ => {}
-                    }
-                }
-                ButtonPress => {
-                    let xbutton: XButtonEvent = From::from(event);
-                    if xbutton.subwindow != 0 {
-                        XGetWindowAttributes(wm.display, xbutton.subwindow, &mut attr);
-                        start = xbutton;
-                        XRaiseWindow(wm.display, xbutton.subwindow);
-                    }
-                }
-                MotionNotify => {
-                    let ev: XMotionEvent = From::from(event);
-                    if start.subwindow != 0 {
-                        //cursor = XCreateFontCursor(display, 58);
-                        //XDefineCursor(display, start.subwindow, cursor);
-                        let xbutton: XButtonEvent = From::from(event);
-                        let xdiff: c_int = xbutton.x_root - start.x_root;
-                        let ydiff: c_int = xbutton.y_root - start.y_root;
-                        XMoveResizeWindow(
-                            wm.display,
-                            start.subwindow,
-                            attr.x + (if start.button == 1 { xdiff } else { 0 }),
-                            attr.y + (if start.button == 1 { ydiff } else { 0 }),
-                            max(1, attr.width + (if start.button == 3 { xdiff } else { 0 })),
-                            max(1, attr.height + (if start.button == 3 { ydiff } else { 0 })),
-                        );
-                    }
-                }
-                ButtonRelease => {
-                    let ev: XButtonReleasedEvent = From::from(event);
-                    start.subwindow = 0;
-                }
-                MapRequest => {
-                    let ev: XMapRequestEvent = From::from(event);
-                    println!("map request -> {:?}", ev);
-                }
-                ConfigureRequest => {
-                    let ev: XConfigureRequestEvent = From::from(event);
-                    println!("configure request request -> {:?}", ev);
-                }
-                Expose => {
-                    let ev: XExposeEvent = From::from(event);
-                    println!("expose request -> {:?}", ev);
-                }
-                ClientMessage => {
-                    let ev: XExposeEvent = From::from(event);
-                    println!("client message -> {:?}", ev);
-                }
-                CreateNotify => {
-                    let ev: XExposeEvent = From::from(event);
-                    println!("create notify -> {:?}", ev);
-                }
-                PropertyNotify => {
-                    let ev: XPropertyEvent = From::from(event);
-                    println!("create notify -> {:?}", ev);
+                    };
                 }
                 _ => {
-                    println!("Unhandled Event {:?} \n {:?} \n", event.get_type(), event);
+                    println!("Unhandled keycode {:?}", event.response_type)
                 }
-            };
+            },
+            ButtonPress(event) => {
+                if event.child != 0 {
+                    window_attributes = Some(event.clone());
+                    ge = Some(get_geometry(&conn, event.child).unwrap().reply().unwrap());
+                    // println!("{:?}", get_geometry(&conn, event.child).unwrap().reply());
+                }
+            }
+            MotionNotify(event) => {
+                if let Some(window_attributes) = window_attributes {
+                    if let Some(ge) = ge {
+                        if window_attributes.child == 0 {
+                            continue;
+                        }
+
+                        let xdiff: i16 = (event.root_x - window_attributes.root_x).into();
+                        let ydiff: i16 = (event.root_y - window_attributes.root_y).into();
+
+                        let new_width = if window_attributes.detail == 3 {
+                            xdiff.try_into().unwrap()
+                        } else {
+                            0
+                        };
+                        let new_height = if window_attributes.detail == 3 {
+                            ydiff.try_into().unwrap()
+                        } else {
+                            0
+                        };
+
+                        println!("{:?}", new_width);
+                        println!("{:?}", new_height);
+
+                        let new_location = ConfigureWindowAux {
+                            x: Some(
+                                (ge.x
+                                    + if window_attributes.detail == 1 {
+                                        xdiff
+                                    } else {
+                                        0
+                                    })
+                                .into(),
+                            ),
+                            y: Some(
+                                (ge.y
+                                    + if window_attributes.detail == 1 {
+                                        ydiff
+                                    } else {
+                                        0
+                                    })
+                                .into(),
+                            ),
+                            width: Some(max(1, i32::from(ge.width) + new_width).try_into().unwrap()),
+                            height: Some(max(1, i32::from(ge.height) + new_height).try_into().unwrap()),
+                            border_width: None,
+                            sibling: None,
+                            stack_mode: None,
+                        };
+                        // println!("{:?}", new_location);
+                        // println!("{:?}", event);
+                        // println!("{:?}", window_attributes);
+                        configure_window(&conn, event.child, &new_location)?;
+                        conn.flush()?;
+                    }
+                }
+            }
+            ClientMessage(event) => {
+                println!("Client Message Event {:?}", event);
+            }
+            _ => {
+                // println!("Event {:?} not implemented yet", event)
+            }
         }
     }
 }

@@ -5,6 +5,8 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+
 [dependencies]
-x11 = { version = "*", features = ["xlib"] }
-libc = "*"
+xcb = { version = "1.1.1", features = ["randr"] }
+x11rb = { version = "0.10.1", features = ["randr"] }
